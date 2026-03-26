@@ -12,7 +12,91 @@ import requests
 import cloudscraper
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, unquote
-from cookie_context import normalize_cookie_records, parse_seed_cookie_string, success_path_label
+try:
+    from cookie_context import normalize_cookie_records, parse_seed_cookie_string, success_path_label
+except ModuleNotFoundError:
+    DEFAULT_COOKIE_DOMAIN = '.dash.hidencloud.com'
+    COOKIE_DOMAIN_OVERRIDES = {
+        'cf_clearance': '.hidencloud.com',
+    }
+    CRITICAL_COOKIE_NAMES = {
+        'XSRF-TOKEN',
+        'hidencloud_session',
+        'cf_clearance',
+        'hc_cf_turnstile',
+    }
+    CRITICAL_COOKIE_PREFIXES = (
+        'remember_web_',
+    )
+
+    def _domain_for_cookie(name):
+        return COOKIE_DOMAIN_OVERRIDES.get(name, DEFAULT_COOKIE_DOMAIN)
+
+    def _is_critical_cookie_name(name):
+        if name in CRITICAL_COOKIE_NAMES:
+            return True
+        return any(name.startswith(prefix) for prefix in CRITICAL_COOKIE_PREFIXES)
+
+    def parse_seed_cookie_string(cookie_str):
+        deduped = {}
+        for item in cookie_str.split(';'):
+            if '=' not in item:
+                continue
+            name, value = item.split('=', 1)
+            name = name.strip()
+            value = value.strip()
+            if not name:
+                continue
+            deduped[name] = {
+                'name': name,
+                'value': value,
+                'domain': _domain_for_cookie(name),
+                'path': '/',
+                'secure': True,
+            }
+        return list(deduped.values())
+
+    def _cookie_score(record):
+        name = str(record.get('name') or '')
+        domain = str(record.get('domain') or '')
+        path = str(record.get('path') or '/')
+        secure = 1 if record.get('secure') else 0
+        preferred_domain = _domain_for_cookie(name)
+        domain_match = 1 if preferred_domain in domain else 0
+        non_empty_domain = 1 if domain else 0
+        return (domain_match, non_empty_domain, len(path), secure)
+
+    def normalize_cookie_records(records):
+        kept_by_name = {}
+        changes = []
+        ordered_passthrough = []
+
+        for record in records:
+            name = str(record.get('name') or '')
+            if not _is_critical_cookie_name(name):
+                ordered_passthrough.append(record)
+                continue
+
+            current = kept_by_name.get(name)
+            if current is None:
+                kept_by_name[name] = record
+                continue
+
+            if _cookie_score(record) >= _cookie_score(current):
+                changes.append({'name': name, 'dropped': current, 'kept': record})
+                kept_by_name[name] = record
+            else:
+                changes.append({'name': name, 'dropped': record, 'kept': current})
+
+        normalized = ordered_passthrough + list(kept_by_name.values())
+        return normalized, changes
+
+    def success_path_label(stage, rebuild_retry=False):
+        if stage == 'first_submit':
+            return '重建会话后首次提交进入成功路径' if rebuild_retry else '首次提交进入成功路径'
+        if stage == 'same_session_retry':
+            return '重建会话后重试进入成功路径' if rebuild_retry else '同会话重试后进入成功路径'
+        return '进入成功路径'
 
 # ================= 配置常量 =================
 RENEW_DAYS = 7
